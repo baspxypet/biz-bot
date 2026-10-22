@@ -318,3 +318,4 @@ bot.on("message", async (msg) => {
 });
 
 console.log("BIZ Bot v2 started! 🤖");
+
