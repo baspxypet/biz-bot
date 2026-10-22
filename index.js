@@ -7,7 +7,7 @@ const { createClient } = require("@supabase/supabase-js");
 const fetch = require("node-fetch");
 const FormData = require("form-data");
 const Jimp = require("jimp");
-const { BrowserQRCodeReader } = require("@zxing/browser");
+
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
