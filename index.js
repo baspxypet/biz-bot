@@ -61,6 +61,7 @@ Use null for missing fields.` }
       }),
     });
     const data = await res.json();
+    console.log("Gemini response:", JSON.stringify(data).slice(0, 300));
     const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
     console.log("Gemini 2.5 Flash-Lite OCR:", raw);
     return raw;
@@ -338,4 +339,4 @@ bot.on("message", async (msg) => {
   await checkSlip(msg, captionAmount);
 });
 
-console.log("BIZ Bot v4 started! 🤖");
+console.log("BIZ Bot v3 started! 🤖");
