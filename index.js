@@ -101,19 +101,46 @@ async function readQRCode(imgBuffer) {
 function parsePromptPayQR(qrContent) {
   let acc = "", amount = "", accType = "พร้อมเพย์";
   try {
-    const numMatch = qrContent.match(/\d{10,13}/g);
-    if (numMatch) {
-      for (const n of numMatch) {
-        if (n.startsWith("00") || n.startsWith("66") || n.startsWith("06") || n.startsWith("08") || n.startsWith("09")) {
-          acc = n.startsWith("66") ? "0" + n.slice(2) : n;
-          accType = "เบอร์โทร/พร้อมเพย์";
-          break;
-        }
-        if (n.length === 13) { acc = n; accType = "เลขประชาชน"; break; }
+    // parse EMV TLV format
+    let i = 0;
+    while (i < qrContent.length) {
+      const tag = qrContent.substring(i, i + 2);
+      const len = parseInt(qrContent.substring(i + 2, i + 4), 10);
+      if (isNaN(len)) break;
+      const val = qrContent.substring(i + 4, i + 4 + len);
+
+      // tag 54 = transaction amount
+      if (tag === "54") {
+        amount = val;
       }
+
+      // tag 29 หรือ 30 = PromptPay merchant
+      if (tag === "29" || tag === "30") {
+        // หาเบอร์/เลขบัญชีใน sub-TLV
+        let j = 0;
+        while (j < val.length) {
+          const stag = val.substring(j, j + 2);
+          const slen = parseInt(val.substring(j + 2, j + 4), 10);
+          if (isNaN(slen)) break;
+          const sval = val.substring(j + 4, j + 4 + slen);
+          if (stag === "01") {
+            // เบอร์โทร/เลขประชาชน/e-wallet
+            if (sval.startsWith("00")) {
+              acc = "0" + sval.slice(2);
+              accType = "เบอร์โทร/พร้อมเพย์";
+            } else if (sval.startsWith("66")) {
+              acc = "0" + sval.slice(2);
+              accType = "เบอร์โทร/พร้อมเพย์";
+            } else {
+              acc = sval;
+              accType = sval.length === 13 ? "เลขประชาชน" : "พร้อมเพย์";
+            }
+          }
+          j += 4 + slen;
+        }
+      }
+      i += 4 + len;
     }
-    const amtMatch = qrContent.match(/54\d{2}([\d.]+)/);
-    if (amtMatch) amount = amtMatch[1];
   } catch (e) { /* ข้าม */ }
   return { acc, amount, accType };
 }
