@@ -125,17 +125,20 @@ function parsePromptPayQR(qrContent) {
     if (ppData) {
       const sub = parseTLV(ppData);
       // sub tag 01 = เลขบัญชี/เบอร์/e-wallet
-      const raw = sub["02"] || sub["01"] || "";
+      const raw = sub["02"] || sub["03"] || sub["01"] || "";
       if (raw) {
         if (raw.startsWith("0066") || raw.startsWith("66")) {
           // เบอร์โทรต่างประเทศ → แปลงเป็นเบอร์ไทย
           acc = "0" + raw.replace(/^(0066|66)/, "");
           accType = "เบอร์โทร";
-        } else if (raw.startsWith("00")) {
-          // เบอร์โทรในประเทศ format 00+เบอร์ 10 หลัก
-          acc = raw.slice(2);
-          if (acc.startsWith("66")) acc = "0" + acc.slice(2);
+        } else if (raw.startsWith("006") && raw.length === 12) {
+          // เบอร์โทร format 006XXXXXXXXX
+          acc = "0" + raw.slice(2);
           accType = "เบอร์โทร";
+        } else if (raw.startsWith("00") && raw.length <= 15) {
+          // e-Wallet หรือเลขบัญชี format 00XXXXX
+          acc = raw;
+          accType = "พร้อมเพย์/e-Wallet";
         } else if (raw.length === 13) {
           acc = raw;
           accType = "เลขประชาชน";
