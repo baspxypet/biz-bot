@@ -339,4 +339,4 @@ bot.on("message", async (msg) => {
   await checkSlip(msg, captionAmount);
 });
 
-console.log("BIZ Bot v3 started! 🤖");
+console.log("BIZ Bot v5 started! 🤖");
