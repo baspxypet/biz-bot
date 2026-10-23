@@ -97,49 +97,53 @@ async function readQRCode(imgBuffer) {
   }
 }
 
-// ===== แปลง PromptPay QR EMV =====
+// ===== แปลง PromptPay QR EMV (TLV parser) =====
+function parseTLV(str) {
+  const result = {};
+  let i = 0;
+  while (i < str.length - 4) {
+    const tag = str.substring(i, i + 2);
+    const len = parseInt(str.substring(i + 2, i + 4));
+    if (isNaN(len) || len <= 0) break;
+    const val = str.substring(i + 4, i + 4 + len);
+    result[tag] = val;
+    i += 4 + len;
+  }
+  return result;
+}
+
 function parsePromptPayQR(qrContent) {
   let acc = "", amount = "", accType = "พร้อมเพย์";
   try {
-    // parse EMV TLV format
-    let i = 0;
-    while (i < qrContent.length) {
-      const tag = qrContent.substring(i, i + 2);
-      const len = parseInt(qrContent.substring(i + 2, i + 4), 10);
-      if (isNaN(len)) break;
-      const val = qrContent.substring(i + 4, i + 4 + len);
+    const tlv = parseTLV(qrContent);
 
-      // tag 54 = transaction amount
-      if (tag === "54") {
-        amount = val;
-      }
+    // tag 54 = ยอดเงิน
+    if (tlv["54"]) amount = tlv["54"];
 
-      // tag 29 หรือ 30 = PromptPay merchant
-      if (tag === "29" || tag === "30") {
-        // หาเบอร์/เลขบัญชีใน sub-TLV
-        let j = 0;
-        while (j < val.length) {
-          const stag = val.substring(j, j + 2);
-          const slen = parseInt(val.substring(j + 2, j + 4), 10);
-          if (isNaN(slen)) break;
-          const sval = val.substring(j + 4, j + 4 + slen);
-          if (stag === "01") {
-            // เบอร์โทร/เลขประชาชน/e-wallet
-            if (sval.startsWith("00")) {
-              acc = "0" + sval.slice(2);
-              accType = "เบอร์โทร/พร้อมเพย์";
-            } else if (sval.startsWith("66")) {
-              acc = "0" + sval.slice(2);
-              accType = "เบอร์โทร/พร้อมเพย์";
-            } else {
-              acc = sval;
-              accType = sval.length === 13 ? "เลขประชาชน" : "พร้อมเพย์";
-            }
-          }
-          j += 4 + slen;
+    // tag 29 หรือ 30 = PromptPay info
+    const ppData = tlv["29"] || tlv["30"] || "";
+    if (ppData) {
+      const sub = parseTLV(ppData);
+      // sub tag 01 = เลขบัญชี/เบอร์/e-wallet
+      const raw = sub["02"] || sub["01"] || "";
+      if (raw) {
+        if (raw.startsWith("0066") || raw.startsWith("66")) {
+          // เบอร์โทรต่างประเทศ → แปลงเป็นเบอร์ไทย
+          acc = "0" + raw.replace(/^(0066|66)/, "");
+          accType = "เบอร์โทร";
+        } else if (raw.startsWith("00")) {
+          // เบอร์โทรในประเทศ format 00+เบอร์ 10 หลัก
+          acc = raw.slice(2);
+          if (acc.startsWith("66")) acc = "0" + acc.slice(2);
+          accType = "เบอร์โทร";
+        } else if (raw.length === 13) {
+          acc = raw;
+          accType = "เลขประชาชน";
+        } else {
+          acc = raw;
+          accType = "พร้อมเพย์";
         }
       }
-      i += 4 + len;
     }
   } catch (e) { /* ข้าม */ }
   return { acc, amount, accType };
