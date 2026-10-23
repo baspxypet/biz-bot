@@ -42,14 +42,19 @@ async function ocrSlip(imgBuffer) {
       body: JSON.stringify({
         contents: [{ parts: [
           { inline_data: { mime_type: "image/jpeg", data: b64 } },
-          { text: `Thai bank/payment slip. Extract these fields from the image:
-1. AMOUNT: transfer amount (จำนวนเงิน), NOT fees (ค่าธรรมเนียม)
-2. RECEIVER_NAME: receiver name (ชื่อผู้รับ/ไปยัง)
-3. ACCOUNT: receiver account last 4 digits (เลขบัญชีผู้รับ)
-4. BANK: receiver bank name in Thai
+          { text: `Thai bank transfer slip image. Find ONLY the transfer amount (จำนวนเงิน).
+- It is a number with 2 decimal places like 100.30 or 499.94
+- It is NOT an account number (which is long like 004999251595053)
+- It is NOT a fee (ค่าธรรมเนียม)
+- Look for the big number labeled จำนวนเงิน or near บาท
+
+Also find:
+- RECEIVER_NAME: name of receiver (ชื่อผู้รับ)
+- ACCOUNT: last 4 digits of receiver account only
+- BANK: receiver bank name in Thai
 
 Reply ONLY: AMOUNT|RECEIVER_NAME|ACCOUNT|BANK
-Example: 100.10|นาง แพร ป|8977|พร้อมเพย์
+Example: 100.30|นาย ไสว ด|null|กสิกร
 Use null for missing fields.` }
         ]}],
         generationConfig: { maxOutputTokens: 100, temperature: 0 },
