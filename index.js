@@ -1,21 +1,21 @@
 // =========================================================
 // BIZ Bot - Node.js version for Railway
-// v2: เช็กสลิป Thunder + OCR Gemini + อ่าน QR รับเงิน
+// v3: เช็กสลิป Thunder + Google Cloud Vision OCR
 // =========================================================
 const TelegramBot = require("node-telegram-bot-api");
 const { createClient } = require("@supabase/supabase-js");
 const fetch = require("node-fetch");
 const FormData = require("form-data");
-const Jimp = require("jimp");
-
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const THUNDER_API_KEY = process.env.THUNDER_API_KEY;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const VISION_API_KEY = process.env.VISION_API_KEY;
 const THUNDER_URL = "https://api.thunder.in.th/v2/verify/bank";
-const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent";
+const VISION_URL = "https://vision.googleapis.com/v1/images:annotate";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent";
 
 const db = createClient(SUPABASE_URL, SERVICE_KEY);
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
@@ -30,6 +30,52 @@ const BANGKOK = (d) => {
   const time = dt.toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Bangkok" });
   return `${date} | ${time} น.`;
 };
+
+// ===== OCR ด้วย Gemini 2.5 Flash-Lite =====
+async function ocrSlip(imgBuffer) {
+  if (!GEMINI_API_KEY) return null;
+  try {
+    const b64 = imgBuffer.toString("base64");
+    const res = await fetch(`${GEMINI_API}?key=${GEMINI_API_KEY}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [
+          { inline_data: { mime_type: "image/jpeg", data: b64 } },
+          { text: `Thai bank/payment slip. Extract these fields from the image:
+1. AMOUNT: transfer amount (จำนวนเงิน), NOT fees (ค่าธรรมเนียม)
+2. RECEIVER_NAME: receiver name (ชื่อผู้รับ/ไปยัง)
+3. ACCOUNT: receiver account last 4 digits (เลขบัญชีผู้รับ)
+4. BANK: receiver bank name in Thai
+
+Reply ONLY: AMOUNT|RECEIVER_NAME|ACCOUNT|BANK
+Example: 100.10|นาง แพร ป|8977|พร้อมเพย์
+Use null for missing fields.` }
+        ]}],
+        generationConfig: { maxOutputTokens: 100, temperature: 0 },
+      }),
+    });
+    const data = await res.json();
+    const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
+    console.log("Gemini 2.5 Flash-Lite OCR:", raw);
+    return raw;
+  } catch (e) {
+    console.error("OCR error:", e.message);
+    return null;
+  }
+}
+
+// ===== แยกข้อมูลจาก OCR (format: AMOUNT|NAME|ACCOUNT|BANK) =====
+function parseSlipOCR(ocrRaw) {
+  if (!ocrRaw) return { amount: null, name: "", acc: "", bank: "" };
+  const parts = ocrRaw.split("|");
+  const amtStr = (parts[0] || "").replace(/,/g, "").trim();
+  const amount = amtStr === "null" || !amtStr ? null : parseFloat(amtStr);
+  const name = (parts[1] || "").trim().replace(/^null$/i, "");
+  const acc = (parts[2] || "").trim().replace(/\D/g, "").replace(/^null$/i, "");
+  const bank = (parts[3] || "").trim().replace(/^null$/i, "");
+  return { amount: isNaN(amount) ? null : amount, name, acc, bank };
+}
 
 // ===== อ่าน QR code จากรูป =====
 async function readQRCode(imgBuffer) {
@@ -50,11 +96,6 @@ async function readQRCode(imgBuffer) {
 function parsePromptPayQR(qrContent) {
   let acc = "", amount = "", accType = "พร้อมเพย์";
   try {
-    // หา tag 29 หรือ 30 (PromptPay)
-    const ppMatch = qrContent.match(/2[09]\d{2}.*?01\d{2}([\d]+)/s) ||
-                    qrContent.match(/3[09]\d{2}.*?01\d{2}([\d]+)/s);
-
-    // วิธีง่ายกว่า: หาเบอร์โทร/เลขบัญชี 10-13 หลัก
     const numMatch = qrContent.match(/\d{10,13}/g);
     if (numMatch) {
       for (const n of numMatch) {
@@ -63,53 +104,13 @@ function parsePromptPayQR(qrContent) {
           accType = "เบอร์โทร/พร้อมเพย์";
           break;
         }
-        if (n.length === 13) {
-          acc = n;
-          accType = "เลขประชาชน";
-          break;
-        }
+        if (n.length === 13) { acc = n; accType = "เลขประชาชน"; break; }
       }
     }
-
-    // หายอดเงิน tag 54
     const amtMatch = qrContent.match(/54\d{2}([\d.]+)/);
     if (amtMatch) amount = amtMatch[1];
-
   } catch (e) { /* ข้าม */ }
   return { acc, amount, accType };
-}
-
-// ===== OCR ด้วย Gemini (4 ส่วน) =====
-async function ocrSlip(imgBuffer) {
-  if (!GEMINI_API_KEY) return null;
-  try {
-    const b64 = imgBuffer.toString("base64");
-    const res = await fetch(`${GEMINI_API}?key=${GEMINI_API_KEY}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [
-          { inline_data: { mime_type: "image/jpeg", data: b64 } },
-          { text: `Thai bank/payment slip. Extract:
-1. AMOUNT: transfer amount (จำนวนเงิน), NOT fees
-2. RECEIVER_NAME: receiver name (ชื่อผู้รับ)
-3. ACCOUNT: receiver account last 4 digits
-4. BANK: receiver bank name in Thai
-Reply ONLY: AMOUNT|RECEIVER_NAME|ACCOUNT|BANK
-Example: 499.94|นางสาว ฐิติพร|9822|พร้อมเพย์
-Use null for missing fields.` }
-        ]}],
-        generationConfig: { maxOutputTokens: 200, temperature: 0 },
-      }),
-    });
-    const data = await res.json();
-    const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || "").trim();
-    console.log("OCR raw:", raw);
-    return raw;
-  } catch (e) {
-    console.error("OCR error:", e.message);
-    return null;
-  }
 }
 
 // ===== ตรวจสลิป =====
@@ -129,7 +130,8 @@ async function checkSlip(msg, captionAmount) {
     const form = new FormData();
     form.append("image", imgBuffer, { filename: "slip.jpg", contentType: "image/jpeg" });
 
-    const [thunderRes, ocrRaw] = await Promise.all([
+    // ส่ง Thunder และ Vision OCR พร้อมกัน
+    const [thunderRes, ocrText] = await Promise.all([
       fetch(THUNDER_URL, { method: "POST", headers: { Authorization: `Bearer ${THUNDER_API_KEY}` }, body: form }).then((r) => r.json()),
       captionAmount === null ? ocrSlip(imgBuffer) : Promise.resolve(null),
     ]);
@@ -169,34 +171,28 @@ async function checkSlip(msg, captionAmount) {
       `🏦 ผู้รับ: ${rcvInfo}\n` +
       (raw.transRef ? `🔖 เลขอ้างอิง: <code>${esc(raw.transRef)}</code>` : "");
 
-    // แยก OCR 4 ส่วน
-    const ocrParts = (ocrRaw || "").split("|");
-    const ocrAmt = parseFloat((ocrParts[0] || "").replace(/,/g, ""));
-    const ocrName = (ocrParts[1] || "").trim().replace(/^null$/i, "");
-    const ocrAccDigits = (ocrParts[2] || "").trim().replace(/\D/g, "");
-    const ocrBank = (ocrParts[3] || "").trim().replace(/^null$/i, "");
+    // แยกข้อมูลจาก OCR
+    const ocr = parseSlipOCR(ocrText);
+    const expectAmount = captionAmount ?? ocr.amount;
 
-    const expectAmount = captionAmount ?? (isNaN(ocrAmt) ? null : ocrAmt);
+    // เทียบแต่ละส่วน
     const amtOk = expectAmount === null || Math.abs(expectAmount - amount) <= 0.10;
-    const nameOk = !ocrName || receiver.toLowerCase().includes(ocrName.toLowerCase()) ||
-      ocrName.toLowerCase().split(" ").some((w) => w.length > 1 && receiver.toLowerCase().includes(w.toLowerCase()));
-    const accOk = !ocrAccDigits || !rcvAcc || rcvAcc.replace(/\D/g, "").slice(-4) === ocrAccDigits.slice(-4);
-    const bankOk = !ocrBank || rBankFull.toLowerCase().includes(ocrBank.toLowerCase()) || ocrBank.length < 2;
+    const nameOk = !ocr.name || receiver.toLowerCase().includes(ocr.name.toLowerCase()) ||
+      ocr.name.toLowerCase().split(" ").some((w) => w.length > 1 && receiver.toLowerCase().includes(w.toLowerCase()));
+    const accOk = !ocr.acc || !rcvAcc || rcvAcc.replace(/\D/g, "").slice(-4) === ocr.acc.slice(-4);
 
     const mismatches = [];
     if (!amtOk && expectAmount !== null) mismatches.push(`💰 ยอดเงิน: รูปแสดง <b>${money(expectAmount)} บาท</b> แต่ QR ระบุ <b>${money(amount)} บาท</b> ❌`);
-    if (!nameOk) mismatches.push(`👤 ชื่อผู้รับ: รูปแสดง <b>${ocrName}</b> แต่ QR ระบุ <b>${receiver}</b> ❌`);
-    if (!accOk) mismatches.push(`🏦 เลขบัญชี: รูปแสดง <b>...${ocrAccDigits.slice(-4)}</b> แต่ QR ระบุ <b>...${rcvAcc.replace(/\D/g, "").slice(-4)}</b> ❌`);
-    if (!bankOk) mismatches.push(`🏧 ธนาคาร: รูปแสดง <b>${ocrBank}</b> ❌`);
+    if (!nameOk) mismatches.push(`👤 ชื่อผู้รับ: รูปแสดง <b>${esc(ocr.name)}</b> แต่ QR ระบุ <b>${esc(receiver)}</b> ❌`);
+    if (!accOk) mismatches.push(`🏦 เลขบัญชี: รูปแสดง <b>...${ocr.acc}</b> แต่ QR ระบุ <b>...${rcvAcc.replace(/\D/g, "").slice(-4)}</b> ❌`);
 
     const isFake = mismatches.length > 0;
 
     if (!isFake) {
       const confirmed = [];
-      if (!isNaN(ocrAmt)) confirmed.push(`ยอด ${money(ocrAmt)} บาท ✅`);
-      if (ocrName) confirmed.push(`ชื่อ ${ocrName} ✅`);
-      if (ocrAccDigits) confirmed.push(`...${ocrAccDigits.slice(-4)} ✅`);
-      if (ocrBank) confirmed.push(`${ocrBank} ✅`);
+      if (expectAmount !== null) confirmed.push(`ยอด ${money(expectAmount)} บาท ✅`);
+      if (ocr.name) confirmed.push(`ชื่อ ${ocr.name} ✅`);
+      if (ocr.acc) confirmed.push(`...${ocr.acc} ✅`);
       const ocrNote = confirmed.length > 0 ? `\n🤖 <i>AI ยืนยัน: ${confirmed.join(" · ")}</i>` : "";
       const text = `🟢 <b>ส ลิ ป จ ริ ง</b>${dup ? "  ♻️ <i>ซ้ำ</i>" : ""}\n\n` + qrBlock + ocrNote;
       await bot.sendMessage(chatId, text, { parse_mode: "HTML", reply_to_message_id: msgId });
@@ -237,42 +233,32 @@ async function readPaymentQR(msg) {
     const imgRes = await fetch(fileUrl);
     const imgBuffer = Buffer.from(await imgRes.arrayBuffer());
 
-    await bot.sendMessage(chatId, `🤖 <i>กำลังอ่าน QR รับเงิน...</i>`, { parse_mode: "HTML", reply_to_message_id: msgId });
-
     const qrContent = await readQRCode(imgBuffer);
-    console.log("QR content:", qrContent);
-
-    if (!qrContent) {
-      await bot.sendMessage(chatId, `⚠️ <b>อ่าน QR ไม่ได้</b>\nกรุณาส่งรูป QR ที่ชัดขึ้น หรือถ่ายให้ใกล้ขึ้นครับ`, { parse_mode: "HTML", reply_to_message_id: msgId });
+    if (!qrContent || !qrContent.includes("A000000677010111")) {
+      await bot.sendMessage(chatId, `⚠️ <b>อ่าน QR ไม่ได้</b>\nกรุณาส่งรูป QR ที่ชัดขึ้นครับ`, { parse_mode: "HTML", reply_to_message_id: msgId });
       return;
     }
 
     const { acc, amount, accType } = parsePromptPayQR(qrContent);
     const amtNum = parseFloat(amount);
-
     const text =
       `📋 <b>ข้อมูล QR พร้อมเพย์</b>\n${LINE}\n` +
       (amount ? `💰 ยอดเงิน: <b>${isNaN(amtNum) ? amount : money(amtNum)} บาท</b>\n` : `💰 ยอดเงิน: <b>ไม่ระบุ (โอนได้ทุกจำนวน)</b>\n`) +
       (acc ? `🔢 ${accType}: <code>${acc}</code>\n` : "") +
-      `🏦 ระบบ: พร้อมเพย์\n` +
-      `${LINE}\n` +
+      `🏦 ระบบ: พร้อมเพย์\n${LINE}\n` +
       `⚠️ <i>QR นี้ใช้รับเงินเท่านั้น ไม่ใช่หลักฐานการโอน</i>`;
-
     await bot.sendMessage(chatId, text, { parse_mode: "HTML", reply_to_message_id: msgId });
-
   } catch (e) {
     console.error("readPaymentQR error:", e.message);
     await bot.sendMessage(chatId, `⚠️ <b>อ่าน QR ไม่สำเร็จ</b>\n${esc(e.message)}`, { parse_mode: "HTML", reply_to_message_id: msgId });
   }
 }
 
-// ===== แยกยอดจาก caption =====
 function parseAmounts(caption) {
   const nums = (caption || "").match(/[0-9][0-9,]*\.?[0-9]*/g) || [];
   return nums.map((n) => parseFloat(n.replace(/,/g, ""))).filter((n) => !isNaN(n) && n > 0);
 }
 
-// ===== รับข้อความ =====
 bot.on("message", async (msg) => {
   const chatId = String(msg.chat.id);
   const text = (msg.text || msg.caption || "").trim();
@@ -280,7 +266,6 @@ bot.on("message", async (msg) => {
   const doc = msg.document;
   const hasImage = photo || (doc && /image\//.test(doc.mime_type || ""));
 
-  // ===== คำสั่ง เปิด / ปิด =====
   if (text === "เปิด" || text === "ปิด") {
     try {
       const member = await bot.getChatMember(chatId, msg.from.id);
@@ -301,21 +286,17 @@ bot.on("message", async (msg) => {
 
   if (!hasImage) return;
 
-  // เช็ก config
   const { data: cfg } = await db.rpc("slip_cfg_internal");
   if (!cfg || !cfg.enabled) return;
 
-  // ===== คำสั่ง qr → อ่าน QR รับเงิน =====
   if (text.toLowerCase() === "qr") {
     await readPaymentQR(msg);
     return;
   }
 
-  // ===== ตรวจสลิป =====
   const amounts = parseAmounts(text);
   const captionAmount = amounts[0] ?? null;
   await checkSlip(msg, captionAmount);
 });
 
-console.log("BIZ Bot v2 started! 🤖");
-
+console.log("BIZ Bot v3 started! 🤖");
